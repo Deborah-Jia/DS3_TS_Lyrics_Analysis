@@ -1,4 +1,3 @@
-# Prep work: load package and get token -----------------------------------
 library(geniusr)
 library(dplyr)
 library(tidytext)
@@ -7,110 +6,66 @@ library(beepr)
 library(parallel)
 library(stringr)
 library(ggplot2)
-# install.packages("RColorBrewer")
 library(RColorBrewer)
-# install.packages('wordcloud2')
 library(wordcloud)
-# install.packages("tm")
 library(tm)
 library(tidyr)
 library(ggraph)
 library(igraph)
 library(syuzhet)
 library(widyr)
-
-setwd("~/Desktop/DS3")
-Sys.setenv(GENIUS_API_TOKEN = readLines("genius_api_token"))
-genius_token()
-
-
-# Retrieve data from Genius API -------------------------------------------
-
-song_df <- search_artist("taylor swift")$artist_id %>% 
-  get_artist_songs_df() %>% distinct(song_id, .keep_all = TRUE)
-
-song_df$song_id <- as.character(song_df$song_id)
-str(song_df)
-# write.csv(song_df, file = "song_df.csv")
-
-process_album  <- function(song_id) {
-  song <- get_song(song_id = song_id)
-  album_list <- list()
-  album_list[['song_id']] <- song_id
-  album_list[['album']] <- song$content$album$name
-  # album_list[['album_id']] <- song$content$album$id
-  album_list[['release']] <- song$content$release_date
-  return(album_list)
-}
-
-numCores <- detectCores() ## you can also do detectCores() - 1 to preserve one core other tasks while this runs!
-
-
-album_df <- rbindlist(mclapply(c(song_df$song_id), process_album, mc.cores = numCores), fill = T)
-# write.csv(album_df, file = "album_df.csv")
-
-
-song_all <- merge(song_df, album_df, by= "song_id", all.x = T)
-
-process_lyrics_url <- function(lyrics_url){
-  lyrics_list <- list()
-  lyrics_list <- get_lyrics_url(song_lyrics_url= lyrics_url)
-}
-
-lyrics_df_url <- rbindlist(mclapply(song_df$song_lyrics_url, process_lyrics_url, mc.cores = numCores))
-# write.csv(lyrics_df_url, file = "lyrics_df_url.csv")
-
-lyrics_df_2 <- merge(lyrics_df_url,song_all,  by= 'song_lyrics_url', all.y = T)
+library(widyr)
+library(tidyr)
 
 # data cleaning -----------------------------------------------------------
+setwd("~/Desktop/DS3")
+lyrics_All <- fread('lyrics_df.csv')
+
+# remove useless columns
+lyrics_All[, c("artist_name.x", 'annotation_count','artist_id', 'artist_name.y', 'section_name','artist_url'):=NULL]
+str(lyrics_All)
 
 # there are speeches, interviews, World Tour Dates and the forewords of songs, delete them.
+drop_names <- c("speech\\d*", "foreword", "Forward",'interview',"Liner Notes",'Intro','tour',"Voice Memo","Setlist", "Album", "phone call", "Future of Music", "Before Turning 30", "power of pop",
+                "Booklet", "Tribute", "Prologue")
 
-drop_names <- c("speech\\d*", "foreword", "Forward",'interview',"Liner Notes","The Power of Pop",'Intro','tour',"Voice Memo","Setlist", "Album", "call", "Future of Music", "Before Turning 30","Booklet")
+lyrics_All <- lyrics_All[!grep(paste(drop_names,collapse="|"), song_name.y, ignore.case = TRUE),,]
 
-lyrics_df_2[, c("artist_name.x", 'song_lyrics_url', 'artist_id', 'artist_name.y', 'artist_url'):=NULL]
+# change album name "Red (Deluxe Edition)", "1989 (Deluxe)",  to "Red" and "1989", as it is the only album available
+lyrics_All$album <-replace(lyrics_All$album, lyrics_All$album == "Red (Deluxe Edition)", "Red") 
+lyrics_All$album <-replace(lyrics_All$album, lyrics_All$album == "1989 (Deluxe)", "1989") 
 
-lyrics_df_2 <- lyrics_df_2[!grep(paste(drop_names,collapse="|"), song_name.y, ignore.case = TRUE),,]
+# remove white space of column album
+lyrics_All$album <- str_trim(lyrics_All$album)
 
-# remove white space of all column
-lyrics_df_2$album <- str_trim(lyrics_df_2$album)
-
-
-names(table(lyrics_All$section_artist))
-table(nchar(lyrics_All$section_name))
-
-
-write.csv(lyrics_df_2, 'lyrics_df_2.csv')
-
-# lyrics 1 and 2 cleaning  and merging ------------------------------------
-lyrics_All <- fread('lyrics_df_2.csv')
-
-
-# data visualization ------------------------------------------------------
+# test_final_t <- unique(lyrics_All[complete.cases(album), .(album, song_name.x),by=song_id])[,.N,by=album] 
+# test_final_s <- unique(lyrics_All[complete.cases(album), .(album, song_name.x,song_name.y),by=song_id])
 
 # extract collaborator names from section singer
 names(table(lyrics_All$section_artist))
 
 lyrics_All$collaborator <- str_replace_all(lyrics_All$section_artist, 
-                                           c("[^a-zA-Z0-9\\s]|Taylor Swift|Bad Blood|Should've Said No|Comes Around|TIWWCHNT|New Year's Day|WANEGBT|What Goes Around|Long Live|Clean|Youre Not Sorry|and|with|Both" = "",
-                                             "Brendon Urie Brendon Urie & Brendon Urie   Brendon Urie" = "Brendon Urie")) %>% 
-  str_trim()
+                                           c("[^a-zA-Z0-9\\s]|Taylor Swift|Bad Blood|Should've Said No|Comes Around|TIWWCHNT|New Year's Day|WANEGBT|What Goes Around|Long Live|Clean|and|with|Both" = "",
+                                             "Brendon Urie Brendon Urie" = "Brendon Urie", "Youre Not Sorry" = "",
+                                             'Brendon Urie   Brendon Urie' = "Brendon Urie")) %>% str_trim()
 
 names(table(lyrics_All$collaborator))
-# %>% str_squish()
+
 # make empty cells NA 
 is.na(lyrics_All) <- lyrics_All == ''
 sort(table(lyrics_All$collaborator))
 
+# calculate the length of each lyrics line and each song
 lyrics_All$len_line <- str_count(lyrics_All$line, '\\w+')
-
 lyrics_All[, len_song := sum(len_line), by = song_id]
 
+# remove songs that are empty and shorter than 60 (64 is her shotrtest song)
 lyrics_All <- lyrics_All[complete.cases(len_song),,]
+lyrics_All <- lyrics_All[len_song> 60,,]
 
-lyrics_All$section_name <- gsub('\\d', '',lyrics_All$section_name) %>% str_squish() 
-names(table(lyrics_All$section_name))
 
+# data visualization ------------------------------------------------------
+# who is Taylor's most dedicated collaborator
 lyrics_All[complete.cases(collaborator), .(count =.N), by = collaborator][1:10] %>% 
   ggplot(aes(x= collaborator, y= count, fill= count)) +
   geom_col() +
@@ -121,8 +76,22 @@ lyrics_All[complete.cases(collaborator), .(count =.N), by = collaborator][1:10] 
   theme_light() +
   theme(legend.position = "none") 
 
-# which album/song has most words? 
 
+# How does the distribution of word count in all her songs?
+unique(lyrics_All[, .(len_song, song_name.y), by = song_id]) %>% 
+  ggplot(aes(len_song)) +
+  geom_histogram(bins=30,aes(fill = ..count..))+
+  geom_vline(aes(xintercept=mean(len_song)),
+             color='#FFFFFF', linetype='dashed', size=1) +
+  geom_density(aes(y= 28* ..count..),alpha=.3, fill='#7DB9DE') +
+  ggtitle('Distribution of word count') +
+  theme_minimal()+xlab("") + ylab("")+ 
+  theme(legend.position = "none") 
+
+# which album/song has most words? 
+st_album <- c("Taylor Swift", "Fearless", "Speak Now", "Red", "1989", "reputation","Lover","Folklore","evermore")
+
+#SONG
 unique(lyrics_All[, .(len_song, song_name.x), by = song_id])[order(-len_song)][1:12] %>% 
   ggplot(aes(x= song_name.y, y=len_song, fill = len_song)) +
   scale_fill_gradient(low='#999999', high="#E69F00")+ 
@@ -133,10 +102,8 @@ unique(lyrics_All[, .(len_song, song_name.x), by = song_id])[order(-len_song)][1
   xlab("") + ylab("")+ 
   theme(legend.position = "none") 
 
-
-# test <- unique(lyrics_All[, .(len_song = sum(len_line), song_name.y), by = song_id])[order(-len_song)][1:30]
-
-unique(lyrics_All[complete.cases(album), .(len_album = sum(len_line)), by = album])[order(-len_album)][1:15] %>% 
+# album
+unique(lyrics_All[(album %in% st_album) & complete.cases(album), .(len_album = sum(len_line)), by = album])[order(-len_album)] %>% 
   ggplot(aes(x= album, y=len_album, fill = len_album)) +
   scale_fill_gradient(low='#D7C4BB', high="#86C166")+ 
   geom_bar(stat='identity') +
@@ -144,42 +111,17 @@ unique(lyrics_All[complete.cases(album), .(len_album = sum(len_line)), by = albu
   aes(x=reorder(album,len_album)) +
   theme_minimal() + 
   xlab("") + ylab("")+ 
-  theme(legend.position = "none") 
-
-# https://www.youtube.com/watch?v=SVY8I46dkb0            
+  theme(legend.position = "none")
+          
 # How does the word count change following the release time?
-
-
 unique(lyrics_All[complete.cases(release), .(len_song, year = substring(release, 1, 4)), by = song_id]) %>% 
   ggplot(aes(x= factor(year),y=len_song, group = 1)) +
   geom_point() +
   geom_smooth(method='lm', formula= y~x, colour = "#DB4D6D")+
   theme_minimal() 
-
-# How does the distribution of word count in all her songs?
-unique(lyrics_All[, .(len_song, song_name.y), by = song_id]) %>% 
-  ggplot(aes(len_song)) +
-  geom_histogram(bins=30,aes(fill = ..count..))+
-  geom_vline(aes(xintercept=mean(len_song)),
-             color='#FFFFFF', linetype='dashed', size=1) +
-             geom_density(aes(y= 46* ..count..),alpha=.3, fill='#7DB9DE') +
-  ggtitle('Distribution of word count') +
-  theme_minimal()+xlab("") + ylab("")+ 
-  theme(legend.position = "none") 
-
-# which section accounts for the largest part of her songs?
-
-
-
-lyrics_All[, .(n_section = .N),by= section_name][order(-n_section)][1:10] %>% 
-  ggplot(aes(x= section_name, y= n_section, fill = n_section)) +
-  scale_fill_gradient(low='#999999', high="#E69F00")+ 
-  geom_bar(stat='identity') +
-  coord_flip() +
-  aes(x=reorder(section_name,n_section)) +
-  theme_minimal() 
   
 # word cloud
+
 #Create a vector containing only the text
 text <- unique(lyrics_All$line)
 # Create a corpus  
@@ -189,7 +131,7 @@ docs <- Corpus(VectorSource(text)) %>%
   tm_map(stripWhitespace)
 # Converting the text to lower case
 docs <- tm_map(docs, content_transformer(tolower))
-# Removing english common stopwords
+# Removing English common stop words
 docs <- tm_map(docs, removeWords, stopwords("english"))
 # creating term document matrix
 dtm <- TermDocumentMatrix(docs) 
@@ -206,29 +148,109 @@ wordcloud(words = dt$word, freq = dt$freq,
           max.words=300, random.order=FALSE,rot.per=0.15,
           colors=brewer.pal(8,"Paired"))
 
-# bigrams
+# Most common positive and negative words
+tidy_lyrics <- lyrics_All[complete.cases(line, album, song_id), .(song_id, album, line),] %>% unnest_tokens(word, line)
 
-lyrics_bigrams <- lyrics_All%>%
-  unnest_tokens(bigram, line, token = 'ngrams', n = 2) %>%
-  separate(bigram, c('word1', 'word2'), sep = ' ') %>%
-  filter(!word1 %in% stop_words$word,
-         !word2 %in% stop_words$word) %>%
-  count(word1, word2, sort = TRUE) %>% drop_na()
 
-head(lyrics_bigrams, 10)
+bing_word_counts <- tidy_lyrics %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
 
-# draw a plot 
-  set.seed(2021)
-  arrow <- grid::arrow(type = 'closed', length = unit(.15, 'inches'))
-  
-  lyrics_bigrams[n > 3&!str_detect(word1, '\\d')&!str_detect(word2, '\\d'),,] %>%
-    graph_from_data_frame() %>%
-    ggraph(layout = 'fr') +
-    geom_edge_link(aes(edge_alpha = n), show.legend = FALSE, arrow = arrow) +
-    geom_node_point(color = 'lightblue', size = 5) +
-    geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
-    ggtitle('Network graph of bigrams') +
-    theme_void()
+bing_word_counts %>%
+  group_by(sentiment) %>%
+  slice_max(n, n = 10) %>% 
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(x = "Contribution to sentiment",
+       y = NULL)
+
+
+# bigrams and n-grams analysis
+
+# Counting and correlating among albums
+bigrams_words <- lyrics_All[complete.cases(line, album, song_id), .(song_id, album, line),] %>%  unnest_tokens(bigram, line, token = "ngrams", n = 2)
+
+bigrams_separated <- bigrams_words %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered <- bigrams_separated %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+
+# new bigram counts:
+bigram_counts <- bigrams_filtered %>% 
+  count(word1, word2, sort = TRUE) 
+
+library(igraph)
+
+# filter for only relatively common combinations
+bigram_graph <- bigram_counts %>%
+  filter(n > 10) %>%
+  graph_from_data_frame()
+
+bigram_graph
+set.seed(2021)
+
+a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
+                 arrow = a, end_cap = circle(.07, 'inches')) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+
+# n-grams
+
+
+# we need to filter for at least relatively common words first
+word_cors <- bigrams_words %>%
+  group_by(bigram) %>%
+  filter(n() >= 20) %>%
+  pairwise_cor(word, album, sort = TRUE)
+
+set.seed(2021)
+
+word_cors %>%
+  filter(correlation > .8) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = correlation), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE) +
+  theme_void()
+
+# N-gram analysis
+cleaned_text <- lyrics_All[album %in% st_album, .(song_id, album, line),] %>% filter(str_detect(line, "^[^>]+[A-Za-z\\d]") | line == "") 
+
+ n_bigrams <- cleaned_text %>%
+  unnest_tokens(bigram, line, token = "ngrams", n = 2)
+
+usenet_bigram_counts <- n_bigrams %>%
+  count(album, bigram, sort = TRUE) %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+negate_words <- c("not", "no", "can't", "don't", "won't", "never")
+
+usenet_bigram_counts %>%
+  filter(word1 %in% negate_words) %>%
+  count(word1, word2, wt = n, sort = TRUE) %>%
+  inner_join(get_sentiments("afinn"), by = c(word2 = "word")) %>%
+  mutate(contribution = value * n) %>%
+  group_by(word1) %>%
+  slice_max(abs(contribution), n = 10) %>%
+  ungroup() %>%
+  mutate(word2 = reorder_within(word2, contribution, word1)) %>%
+  ggplot(aes(contribution, word2, fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ word1, scales = "free", nrow = 3) +
+  scale_y_reordered() +
+  labs(x = "Sentiment value * # of occurrences",
+       y = "Words preceded by a negation")
 
 # Sentiment Analysis
  # Getting the sentiment value for the lyrics, and add cumulative value of the sentiments to a datatable
@@ -248,6 +270,54 @@ head(lyrics_bigrams, 10)
     theme_light() +
     theme(legend.position = 'none')
   
+  # Sentiment analysis: Sentiment analysis by word:
+  library("textdata")
+  contributions <- TS_words %>%
+    inner_join(get_sentiments("afinn"), by = "word") %>%
+    group_by(word) %>%
+    summarize(occurences = n(),
+              contribution = sum(value))
+  
+  contributions
+  # Which words had the most effect on sentiment values overall (Figure 9.7)?
+  contributions %>%
+    slice_max(abs(contribution), n = 25) %>%
+    mutate(word = reorder(word, contribution)) %>%
+    ggplot(aes(contribution, word, fill = contribution > 0)) +
+    geom_col(show.legend = FALSE) +
+    labs(y = NULL)
+  
+  # word by album
+  top_sentiment_words <- words_by_album %>%
+    inner_join(get_sentiments("afinn"), by = "word") %>%
+    mutate(contribution = value * n / sum(n))
+  
+  top_sentiment_words
+  
+  top_sentiment_words %>%
+    filter(str_detect(album, regex(st_album, ignore_case = T))) %>%
+    group_by(album) %>%
+    slice_max(abs(contribution), n = 12) %>%
+    ungroup() %>%
+    mutate(album = reorder(album, contribution),
+           word = reorder_within(word, contribution, album)) %>%
+    ggplot(aes(contribution, word, fill = contribution > 0)) +
+    geom_col(show.legend = FALSE) +
+    scale_y_reordered() +
+    facet_wrap(~ album, scales = "free") +
+    labs(x = "Sentiment value * # of occurrences", y = NULL)  
+  
+  ### Sentiment analysis by lyrics lines
+  cleaned_text %>% filter(str_detect(line, "\\w+")) %>% mutate(sentiment = get_sentiment(line)) %>% 
+    group_by(sentiment < 0) %>%
+    slice_max(abs(sentiment), n = 15) %>% 
+    ungroup() %>%
+    mutate(line = reorder(line, sentiment)) %>%
+    ggplot(aes(line, sentiment, fill = sentiment < 0)) +
+    geom_col(show.legend = FALSE) +
+    coord_flip() 
+  
+  
 # topic modeling
   # 1.1 Pre-processing text
   library(stringr)
@@ -255,7 +325,7 @@ head(lyrics_bigrams, 10)
   # must occur after the first occurrence of an empty line,
   
   library(tidytext)
-  cleaned_text <- lyrics_All[complete.cases(line, album, song_id), .(song_id, album, line),] %>% tibble()
+  clean_text <- lyrics_All[complete.cases(line, album, song_id), .(song_id, album, line),] %>% tibble()
   
   TS_words <- cleaned_text %>%
     unnest_tokens(word, line) %>%
@@ -277,7 +347,7 @@ head(lyrics_bigrams, 10)
   
   tf_idf
 
-  st_album <- "Taylor Swift|Fearless|speak now|red|1989|reputation|lover|Folklore|evermore"
+  
   
   tf_idf %>%
     filter(str_detect(album, regex(st_album, ignore_case = T))) %>%
@@ -352,44 +422,6 @@ head(lyrics_bigrams, 10)
     labs(x = "Topic",
          y = "# of messages where this was the highest % topic")  
 
-  # Sentiment analysis: Sentiment analysis by word:
-  library("textdata")
-  contributions <- TS_words %>%
-    inner_join(get_sentiments("afinn"), by = "word") %>%
-    group_by(word) %>%
-    summarize(occurences = n(),
-              contribution = sum(value))
-  
-  contributions
-# Which words had the most effect on sentiment values overall (Figure 9.7)?
-  contributions %>%
-    slice_max(abs(contribution), n = 25) %>%
-    mutate(word = reorder(word, contribution)) %>%
-    ggplot(aes(contribution, word, fill = contribution > 0)) +
-    geom_col(show.legend = FALSE) +
-    labs(y = NULL)
-
-  # word by album
-  top_sentiment_words <- words_by_album %>%
-    inner_join(get_sentiments("afinn"), by = "word") %>%
-    mutate(contribution = value * n / sum(n))
-  
-  top_sentiment_words
-
-  top_sentiment_words %>%
-    filter(str_detect(album, regex(st_album, ignore_case = T))) %>%
-    group_by(album) %>%
-    slice_max(abs(contribution), n = 12) %>%
-    ungroup() %>%
-    mutate(album = reorder(album, contribution),
-           word = reorder_within(word, contribution, album)) %>%
-    ggplot(aes(contribution, word, fill = contribution > 0)) +
-    geom_col(show.legend = FALSE) +
-    scale_y_reordered() +
-    facet_wrap(~ album, scales = "free") +
-    labs(x = "Sentiment value * # of occurrences", y = NULL)  
-
-  ### Sentiment analysis by lyrics lines
-  cleaned_text[str_detect(line, "\\w+"), sentiment := get_sentiment(lyric_column), ]
+    
 
   
