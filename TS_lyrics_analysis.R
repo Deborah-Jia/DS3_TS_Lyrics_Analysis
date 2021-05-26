@@ -14,7 +14,6 @@ library(ggraph)
 library(igraph)
 library(syuzhet)
 library(widyr)
-library(widyr)
 library(tidyr)
 
 # data cleaning -----------------------------------------------------------
@@ -64,8 +63,9 @@ lyrics_All <- lyrics_All[complete.cases(len_song),,]
 lyrics_All <- lyrics_All[len_song> 60,,]
 
 
+
 # data visualization ------------------------------------------------------
-# who is Taylor's most dedicated collaborator
+# who is Taylor's most dedicated collaborator (waffel chart!!!)
 lyrics_All[complete.cases(collaborator), .(count =.N), by = collaborator][1:10] %>% 
   ggplot(aes(x= collaborator, y= count, fill= count)) +
   geom_col() +
