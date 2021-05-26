@@ -1,0 +1,516 @@
+---
+title: "Taylor Swift Lyrics Analysis: Is She Way Too Lovery-dovery in Her Songs?"
+author: '2000692'
+date: "5/25/2021"
+output:
+  rmdformats::readthedown:
+    toc_depth: 3
+    df_print: paged
+    highlight: kate
+---
+<!-- ![](/Users/wodediannao/Desktop/WechatIMG190.jpeg) -->
+
+##  Introduction
+
+As one of the most successful singer-songwriters of her generation, Taylor Swift infuses her personal life into her music and receives a lot of media coverage. Fans have had more fun asking, "Who's this song about?" We are curious about what emotion she poured into the songs through her lines in the lyrics. Therefore, we put together all her lyrics and intend to analyze the sentiment. The data is retrieved from [Genius](https://genius.com/), the world's most extensive collection of song lyrics and musical knowledge platform, via R package **geniusr**. Most of our analysis covers all her songs (incl. studio albums, extended plays, and live performance); we scale down to studio albums only when it comes to album-level analysis.
+
+##  Data Preparation
+### 1.  Gather Data
+
+For data collection from Genius, we use the Cran package "**geniusr**," which provides loads of functions to get lyrics and other music info. We first register a genius token for permission, get all Taylor Swift songs, merge the table with album names, and use both song id and the URL of lyrics to retrieve the lyrics. There is an issue when we get lyrics: two lyrics data frames generated from song-id and lyrics URL have overlapping rows but are not precisely the same; so we take song_id as the primary key, take the rows of difference as a subset from one data frame, and concatenate the subset to the second data frame. In this way, we obtain a complete data set, with Taylor's all songs, album names, and lyrics in lines.
+
+<!-- ![data retrive and merge](/Users/wodediannao/Desktop/WechatIMG189.png) -->
+
+```{r setup, include=FALSE}
+## Global options
+library(knitr)
+opts_chunk$set(echo = F, message = F, warning = F, cache = F)
+library(geniusr)
+library(dplyr)
+library(tidytext)
+library(data.table)
+library(beepr)
+library(parallel)
+library(stringr)
+library(ggplot2)
+library(RColorBrewer)
+library(wordcloud)
+library(tm)
+library(tidyr)
+library(ggraph)
+library(igraph)
+library(syuzhet)
+library(widyr)
+library(tidyr)
+library(stringr)
+library(tidytext)
+library(kableExtra)
+# data cleaning -----------------------------------------------------------
+lyrics_All <- fread('lyrics_df.csv')
+
+# remove useless columns
+lyrics_All[, c("artist_name.x", 'annotation_count','artist_id', 'artist_name.y', 'section_name','artist_url'):=NULL]
+str(lyrics_All)
+
+# there are speeches, interviews, World Tour Dates and the forewords of songs, delete them.
+drop_names <- c("speech\\d*", "foreword", "Forward",'interview',"Liner Notes",'Intro','tour',"Voice Memo","Setlist", "Album", "phone call", "Future of Music", "Before Turning 30", "power of pop",
+                "Booklet", "Tribute", "Prologue")
+
+lyrics_All <- lyrics_All[!grep(paste(drop_names,collapse="|"), song_name.y, ignore.case = TRUE),,]
+
+# change album name "Red (Deluxe Edition)", "1989 (Deluxe)",  to "Red" and "1989", as it is the only album available
+lyrics_All$album <-replace(lyrics_All$album, lyrics_All$album == "Red (Deluxe Edition)", "Red") 
+lyrics_All$album <-replace(lyrics_All$album, lyrics_All$album == "1989 (Deluxe)", "1989") 
+
+# remove white space of column album
+lyrics_All$album <- str_trim(lyrics_All$album)
+
+# test_final_t <- unique(lyrics_All[complete.cases(album), .(album, song_name.x),by=song_id])[,.N,by=album] 
+# test_final_s <- unique(lyrics_All[complete.cases(album), .(album, song_name.x,song_name.y),by=song_id])
+
+# extract collaborator names from section singer
+names(table(lyrics_All$section_artist))
+
+lyrics_All$collaborator <- str_replace_all(lyrics_All$section_artist, 
+                                           c("[^a-zA-Z0-9\\s]|Taylor Swift|Bad Blood|Should've Said No|Comes Around|TIWWCHNT|New Year's Day|WANEGBT|What Goes Around|Long Live|Clean|and|with|Both" = "",
+                                             "Brendon Urie Brendon Urie" = "Brendon Urie", "Youre Not Sorry" = "",
+                                             'Brendon Urie   Brendon Urie' = "Brendon Urie")) %>% str_trim()
+
+names(table(lyrics_All$collaborator))
+
+# make empty cells NA 
+is.na(lyrics_All) <- lyrics_All == ''
+sort(table(lyrics_All$collaborator))
+
+# calculate the length of each lyrics line and each song
+lyrics_All$len_line <- str_count(lyrics_All$line, '\\w+')
+lyrics_All[, len_song := sum(len_line), by = song_id]
+
+# remove songs that are empty and shorter than 60 (64 is her shotrtest song)
+lyrics_All <- lyrics_All[complete.cases(len_song),,]
+lyrics_All <- lyrics_All[len_song> 60,,]
+```
+
+Next, we clean the raw data and get it ready for analysis. The data table contains unnecessary rows such as Taylor's speeches, interviews, voice memos, and liner notes. We find these patterns in song names and remove rows. We count the number of words in each line and calculate song length by grouping song id. Also, we remove songs with a size less than 60 characters (mostly youtube advertisements). We create a new column called collaborator by extracting section artist names from another column, using regex. Ultimately, we replace all empty cells with N/As. In this clean data table, there are `r nrow(lyrics_All)` observations and `r ncol(lyrics_All)` variables. We will first focus on exploratory data analysis and then use the lines of the lyrics for text analysis. What worth paying attention to is, each row means one line of song lyrics; in this way, the song id is no longer a primary key to distinguish each row. We will use a lot of the "**unique()**" function to remove duplicates in rows for this issue.
+
+```{r}
+lyrics_All %>% 
+  kable(caption = "Scrollable table") %>% 
+  kable_styling() %>% 
+  scroll_box(width = "100%", height = "300px")
+```
+
+### 2. Techniques
+
+For exploratory data analysis, I mainly use "**dplyr**", "**data.table**" and "**ggplot**": filter, group by, and summarize data, and visualize the result.
+For text analysis, there are five parts.  
+
+* Word Cloud: word frequency in all lyrics using __wordcloud__ package.  
+* Sentiment analysis  
+  * word-based multiple-sentiment analysis with "**NRC**" lexicon. (wrap up all word in the lyrics and categorize them into multiple sentiments)  
+  * word-based positive and negative sentiment analysis with "**Bing**" lexicon. (categorize all words into positive and negative sentiments, and check what word contribute most)  
+  * album-level sentiment analysis with "**afinn**" lexicon. (group lyrics words by album, and check in each album how the most optimistic and pessimistic word contribute the sentiment)  
+  * (lyrics) line-level sentiment with "**sentimentr**" package. (trace the darkest and warmest lines in her songs, and find the background story)  
+* Bigrams and N-grams analysis: find relations between words and what words are following negations in the lyrics.  
+* Topic modeling: track any topic in her lyrics and case to identify her albums.  
+
+##  Exploratory Data Analysis
+
+### 1.  Her Favorite Collaborator
+
+Of all Taylor's songs, she alone sings about `r lyrics_All %>% filter(section_artist == "Taylor Swift") %>% nrow()` lines; still there are about 1 thousand lines that are performed by others. Brendon Urie performed most of the time among all those singers: he sang more than 140 lines in all Taylor's songs. Before for the hit song "ME!", they two have been collaborating for years, possibly because they [share polished pop styles](https://www.refinery29.com/en-us/who-is-brendon-urie-taylor-swift-friends-me-song).
+
+```{r}
+# data visualization ------------------------------------------------------
+library(waffle)
+c_dt <- lyrics_All[complete.cases(collaborator), .(count =.N), by = collaborator][order(-count)][1:5]
+waffle_vector <- c_dt$count 
+names(waffle_vector) <- c_dt$collaborator 
+ordered_c <- lyrics_All[order(-collaborator)]
+waffle(waffle_vector/5, colors=c("#4B4E2A", "#FBE251", "#97b5cf", "#0089A7","#7e1671" ), 
+       title="Lines of Songs Performed by Collaborators", rows = 5, xlab = "1 square = 5 lines")
+```
+  
+### 2.  Distribution of Word Count
+
+We are also curious about the distribution of words in each song. As in the data cleaning part, we have already created the column of song length. To answer this question, we group each piece by its id and choose a unique song id and song length. From the plot below, we see how each song's word count varies:
+
+* Most songs fall in the range of 100-600 words. There is an extreme value of 700+ words, which results in left skewness and the long right tail shape of the plot.
+* Nearly 35 songs are in the range of 300-350 words. This range appears most in all songs, but due to the extreme value, the mean value of word count is shifted to the right side, and it is about 360 words.
+
+
+```{r}
+unique(lyrics_All[, .(len_song, song_name.y), by = song_id]) %>% 
+  ggplot(aes(len_song)) +
+  geom_histogram(bins=30,aes(fill = ..count..))+
+  geom_vline(aes(xintercept=mean(len_song)),
+             color='#FFFFFF', linetype='dashed', size=1) +
+  geom_density(aes(y= 28* ..count..),alpha=.3, fill='#7DB9DE') +
+  ggtitle('Distribution of word count') +
+  theme_minimal()+xlab("") + ylab("")+ 
+  theme(legend.position = "none")
+```
+  
+### 3.  Word Count By Song and Album.
+For the extremely "lengthy" song mentioned in the last question, we would like to find its name and see if it affects the word count of the album. Like the steps in answering the previous question, we group the data table separately by song id and album name. The data table contains all Taylor's albums, including other language versions of the classic studio album, the world tour, live performance, and so forth. We choose to take into account her classic albums only. We create a vector containing all her studio album names and extract from the data table the classic albums only.
+
+It's not surprising that the top 10 songs all exceed 500 words, and the incredibly "lengthy" song has more than 700 words. As the song "End Game" comes from the album "reputation," it makes sense that "reputation" also ranks first in word count for all her albums.
+
+```{r}
+# which album/song has most words? 
+st_album <- c("Taylor Swift", "Fearless", "Speak Now", "Red", "1989", "reputation","Lover","Folklore","evermore")
+
+#SONG
+unique(lyrics_All[, .(len_song, song_name.x), by = song_id])[order(-len_song)][1:12] %>% 
+  ggplot(aes(x= song_name.y, y=len_song, fill = len_song)) +
+  scale_fill_gradient(low='#999999', high="#E69F00")+ 
+  geom_bar(stat='identity') +
+  coord_flip() +
+  aes(x=reorder(song_name.x,len_song)) +
+             theme_minimal() +
+  xlab("") + ylab("")+ 
+  theme(legend.position = "none") 
+```
+
+In this way, it seems unfair to compare album songs simply by sum word count, as an album with more songs will also have more words. We manage to calculate the average song length in each album and see a new rank.
+
+```{r}
+# album
+unique(lyrics_All[(album %in% st_album) & complete.cases(album), .(len_album = sum(len_line)), by = album])[order(-len_album)] %>% 
+  ggplot(aes(x= album, y=len_album, fill = len_album)) +
+  scale_fill_gradient(low='#D7C4BB', high="#86C166")+ 
+  geom_bar(stat='identity') +
+  coord_flip() +
+  aes(x=reorder(album,len_album)) +
+  theme_minimal() + 
+  xlab("") + ylab("")+ 
+  theme(legend.position = "none")
+```
+
+Surprisingly, "1989" and "reputation" are still the top 2 when calculating average song length in each album. Even though other albums have far more songs, the extreme values in these two albums keep the total/average word count high.
+
+```{r}
+test_final_t <- unique(lyrics_All[complete.cases(album), .(album, song_name.x),by=song_id])[,.N,by=album]
+data <- merge(unique(lyrics_All[(album %in% st_album) & complete.cases(album), .(len_album = sum(len_line)), by = album])[order(-len_album)], test_final_t, by = "album")
+data[,avg_len:= len_album/N,] %>% ggplot(aes(x=album, y=avg_len)) + geom_segment(aes(x=album, xend=album, y=0, yend=avg_len), color="grey") +
+  geom_point( color="orange", size=4) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("") +
+  ylab("average song length, in word")
+```
+
+### 4.  Word Count Change Following Release Time
+
+Do you know when "1989" and "reputation" were released? They were 2014 and 2017! As two decades have passed since Taylor's debut, we wonder how the length of her songs changed over time. One guess is that it's slightly longer; on average, as she is so popular, you can see her in all types of performance shows, so her re-mix recreation probability is high. Therefore, we group the data table again by song id and order the song length chronologically. We didn't use a line chart as too many lines cramped together are not presentable at all, but a mere scatter plot has limited info, too. We choose a combination of scatter plot and lowess smooth line: in this way, both the trend and the length of a single song can be observed clearly.
+
+Before 2017, both the shortest and longest songs in Taylor's album have been increased length yearly. Also, within this timeline, the range of her songs' word count has been enlarging, too. Things start to change since 2017 when her most extended piece, "End Game," reached a climax in song length; after 2017, the most length song in her album start to have fewer words and the song length range decrease. If we take a closer look at the regression line, we can see that there's a slight climb of her song length, from initially 300+ words to nearly 400. 
+
+```{r}
+unique(lyrics_All[complete.cases(release), .(len_song, year = substring(release, 1, 4)), by = song_id]) %>% 
+  ggplot(aes(x= factor(year),y=len_song, group = 1)) +
+  geom_point() + labs(x = "Release Year", y= "Song Length")+
+  geom_smooth(method='lm', formula= y~x, colour = "#DB4D6D")+
+  theme_minimal() 
+```
+ 
+##  Text Analysis
+
+We now shift our focus from word count to word meanings. In this section, we will concentrate on the lines of the lyrics of Taylor's songs, study the sentiment in her songs, and the linkage between her lyrics words. Through this section, we take a deep dive into the lyrics and hope to track her emotion between the lines of poems.
+
+### 1.  Word Cloud
+
+Our first question would be: what are the most common words in Taylor's songs? Do they tend to be darker or warmer? Most people's first impression would be that she spent too many lines complaining about her past relationships. Here we throw all lyrics lines into one place, remove numbers, punctuation, and white space. More frequent words are centered in the cloud, with larger font and noticeable color. From the plot below, we can see that the most common terms include "like," "know," "don't," "just," "love," "you're," "baby," and "never". The significant occurrences of words like "love" and "like" denote that she wrote many lines about romantic relations. Furthermore, we tend to think that a large portion of her songs describes people as a very high frequency of the word "you're."
+
+```{r}
+#Create a vector containing only the text
+text <- lyrics_All$line
+# Create a corpus
+docs <- Corpus(VectorSource(text)) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removePunctuation) %>%
+  tm_map(stripWhitespace)
+# Converting the text to lower case
+docs <- tm_map(docs, content_transformer(tolower))
+# Removing English common stop words
+docs <- tm_map(docs, removeWords, stopwords("english"))
+# creating term document matrix
+dtm <- TermDocumentMatrix(docs)
+# defining tdm as matrix
+matrix <- as.matrix(dtm)
+# getting word counts in decreasing order
+words <- sort(rowSums(matrix),decreasing=TRUE)
+# creating a data frame with words and their frequencies
+dt <- data.table(word = names(words),freq=words)
+
+set.seed(1233) # for reproducibility
+wordcloud(words = dt$word, freq = dt$freq,
+          min.freq = 1,scale=c(1.5,.8),
+          max.words=300, random.order=FALSE,rot.per=0.15,
+          colors=brewer.pal(8,"Paired"))
+```
+
+From the last question, we observe that the most frequent words include both negative and positive ones. One may get curious how the most frequent positive and negative words contribute to each sentiment. To track the sentiment of each word, we choose "**bing**" lexicons to carry our study, as only "bing" categorizes words in a binary fashion into positive and negative categories. As this question involves part of sentiment analysis, the method of simply merging lyrics seems rough and doesn't make sense. Hence, we use the "**unnest_tokens()**" function to break the text into individual tokens and transform it into a tidy data structure. Next, we implement "count()" here with arguments of both word and sentiment, and finally find out the contribution of each word to each sentiment.
+
+```{r}
+# Most common positive and negative words
+tidy_lyrics <- lyrics_All[complete.cases(line, album, song_id), .(song_id, album, line),] %>% unnest_tokens(word, line)
+
+bing_word_counts <- tidy_lyrics %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+bing_word_counts %>%
+  group_by(sentiment) %>%
+  slice_max(n, n = 10) %>% 
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(x = "Contribution to sentiment",
+       y = NULL)
+```
+
+Here we observe again that "like" and "love" are the most frequent words and contribute the most to positive mode. Both groups of words have precise meanings, so we think they make the correct contribution to the sentiment. Recall from class that in Jane Austen's work, "miss" contributed significantly to negative sentiment, which is ambiguous as the word also means "young, unmarried woman" in Austen's times. Here we can rest assured, as the word "miss" is no longer popular as a title, and also, it doesn't appear much in Taylor's songs. Is it possible that all the verbs and adjectives in this context are combined with negation words ("don't", "not", "no", etc.)? We will keep this question and discuss it later. 
+
+### 2.  Bigrams analysis
+
+We have considered words as individual units and how a single word contributes to the sentiment. Nevertheless, we would like to move further and study the relations between or among words. By seeing how often word X is followed by word Y, we can build a model and scrutinize the links. Here we have a new noun: ngrams. It means a number of adjacent words rather than individual ones. When n = 2, we examine pairs of two consecutive terms, often called “bigrams.”
+
+To continue our study, we add new parameter "token = "ngrams", n=2" to our "**unnest_tokens**" function; then we use "**separate()**" function to separate bigrams into two words. We also remove stops from both words. We then filter words by frequency, assign the value to a new data table and get ready for the network of bigrams creation.
+
+```{r}
+# Counting and correlating among albums
+bigrams_words <- lyrics_All[complete.cases(line, album, song_id), .(song_id, album, line),] %>%  unnest_tokens(bigram, line, token = "ngrams", n = 2)
+
+bigrams_separated <- bigrams_words %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered <- bigrams_separated %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+
+# new bigram counts:
+bigram_counts <- bigrams_filtered %>% 
+  count(word1, word2, sort = TRUE) 
+
+library(igraph)
+
+# filter for only relatively common combinations
+bigram_graph <- bigram_counts %>%
+  filter(n > 10) %>%
+  graph_from_data_frame()
+
+set.seed(2022)
+
+a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
+                 arrow = a, end_cap = circle(.07, 'inches')) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+As song lyrics are much shorter than novel chapters, there is a lower frequency of bigrams occurrence at a general level. We reduce the occurrence to 10 times and visualize the network. There is no prominent center of words, and most words appear alone. On the bottom left, we see pairs or triplets along the outside that form common short expressions like "wildest dreams," "red lips," "wasted time," and "mad woman" (what a stereotype)!
+
+### 3.  Sentiment Analysis
+
+Previously we have walked through a simplified sentiment analysis by looking at the most common positive and negative words. We would like to know more sentiment categories and how sentiment differentiates among albums. Also, our data table has an obvious advantage: we have each line of lyrics as a row; it is a perfect opportunity to catch the most positive and negative lines in her songs and dig out what's behind the scene! Let's get started.
+
+We pre-process our data again: use unnest_tokens() to split the data set into tokens and remove stop-words. The "TS_words" data set includes song_id, album, and word; we create another data set, "words_by_album," by counting the frequency of words in each album.
+
+```{r}
+cleaned_text <- lyrics_All[complete.cases(line, album, song_id), .(song_id, album, line),] 
+  
+  TS_words <- cleaned_text %>%
+    unnest_tokens(word, line) %>%
+    filter(str_detect(word, "[a-z']$"),
+           !word %in% stop_words$word)
+
+  # #Words in albums
+  # TS_words %>%
+  #   count(word, sort = TRUE)
+
+  words_by_album <- TS_words[(album %in% st_album), ,] %>%
+    count(album, word, sort = TRUE) %>%
+    ungroup()
+```
+
+We start from low-level sentiment analysis: similar to what we did in the word cloud, we put all words into the sentiment machine and ask for a general result. Here we choose the "**NRC**" lexicon as it has more than two sentiment categories: positive, negative, anger, anticipation, disgust, fear, joy, sadness, surprise, and trust. There seems to be more positive sentiment than negative sentiment, as most sentiment representing positive moods are taller than negative ones. Wait, bear one thing in mind: the existence of negation words might reverse the current situation. It's still too early to conclude.
+
+```{r}
+# Getting the sentiment value for the lyrics, and add cumulative value of the sentiments to a datatable
+  # sentimentscores <- data.table(colSums(get_nrc_sentiment((text))[,]))
+
+  sentim_scores <- get_nrc_sentiment((TS_words$word))
+  sentim_scores<- data.frame(colSums(sentim_scores[,]))
+  sentim_scores <- sentim_scores %>% mutate(sentiment = rownames(sentim_scores)) %>% rename(Score = colSums.sentim_scores.....)
+  
+  # Plot for the cumulative sentiments
+  sentim_scores %>% 
+    ggplot(aes(x=sentiment,y=Score, fill= Score))+
+    geom_bar(stat = 'identity')+
+    ggtitle('Total sentiment based on scores')+
+    aes(x=reorder(sentiment,Score)) +
+    scale_fill_gradient(low='#67B7C2', high="#C26793")+ 
+    theme_light() +
+    theme(legend.position = 'none') +
+    xlab("")
+```
+Would there be a massive difference in the sentiment of different albums? What are the most common positive and negative words in each album? To answer these questions, we take one step further: first, calculate each word's contribution to each album's sentiment score and then visualize the most substantial contributors from selecting the groups. Note that we pick only Taylor's nine classic albums, as those studio albums have far more songs and their sentiment scores are less vulnerable to single words with vehement emotion. We use the **AFFIN** lexicon to detect the sentiment, as it assigns words with a score, which will help us understand the sentiment degree.
+
+Take a look at the below plots, and you will notice there are some interesting patterns. "Reputation" has far more negative words than other albums, and the word "worst" contributes a lot to the negative sentiment. Compared with other albums, "Reputation" is so noticeable for its negativity that we can't help wondering what happened at that time? She was under the attack of slander claims from Kanye West and trolls. And the release of "Reputation" announced [her fightback to foul plays](https://taylorswift.fandom.com/wiki/Reputation).
+
+Another fun thing is in the album "Taylor Swift": the word "cock" was labeled unfavorable and contributed most to the negativity. Why? Since when do animals have sentiment, too? We trace the word back to the lyrics and find it comes from the phrase "cock it and pull it." This strange slang means "I'll be your number one with a bullet" - sounds brave and gutsy. So, sometimes robots do deceive us.
+
+```{r}
+  # word by album
+  top_sentiment_words <- words_by_album %>%
+    inner_join(get_sentiments("afinn"), by = "word") %>%
+    mutate(contribution = value * n / sum(n))
+  
+  top_sentiment_words %>%
+    filter(str_detect(album, regex(st_album, ignore_case = T))) %>%
+    group_by(album) %>%
+    slice_max(abs(contribution), n = 12) %>%
+    ungroup() %>%
+    mutate(album = reorder(album, contribution),
+           word = reorder_within(word, contribution, album)) %>%
+    ggplot(aes(contribution, word, fill = contribution > 0)) +
+    geom_col(show.legend = FALSE) +
+    scale_y_reordered() +
+    facet_wrap(~ album, scales = "free") +
+    labs(x = "Sentiment contribution", y = NULL) 
+```
+
+The album-level sentiment analysis seems comprehensive, but it's a bit annoying to track the original data set and confirm the sentiment. In the final step of this chapter, we go down to line-level analysis, attempting to find the warmest and darkest lines. We calculate the sentiment score of each line, get the absolute value of scores, and choose the top ten. 
+
+Interesting. In the most extreme lines, there are more negative ones than positive ones. We check the happiest and saddest ones. The longest green bar was annotated "Wish you were right here, right now, it's all good." Whom did she write this line? It is Harry Styles, the one [bought a house two blocks from hers](https://tameimpala222.tumblr.com/post/153265953038/hows-i-wish-you-would-about-harry-just-asking) and [it's the first time she had become friends with an ex to the point where they were comfortable enough to talk about why the relationship didn't work out](https://www.songfacts.com/facts/taylor-swift/i-wish-you-would). 
+
+We studied other lines as well and listed all person she refers to:
+
+* "Loves me like I'm brand new," from "Reputation," reveals [her recovery after 2016's Kimye Snapchat abuse.](https://www.elle.com/culture/music/a13146489/taylor-swifts-call-it-what-you-want-lyrics-kim-kardashian-kanye-west-joe-alwyn-references/)
+* "Wishing you never found out that love could be that strong" from "Red"; some guesses are that the whole album was for [Jake Gyllenhaal](https://www.refinery29.com/en-us/2020/10/10131646/taylor-swift-red-breakup-album-jake-gyllenhaal), another ex.  
+* "And a liar, and pathetic, and alone in life," from "Mean." She wrote this one to respond to those pundits laid into her and humiliated her in [Swift's subpar performance of Fleetwood Mac's "Rhiannon."](https://www.songfacts.com/facts/taylor-swift/mean)
+* "The Rumors Are Terrible And Cruel, But Most Of Them Are True," from "New romantics." She's just poking fun at [all the rumors about her that happen all the time](https://www.bustle.com/articles/144868-taylor-swifts-new-romantics-lyrics-meaning-show-how-well-she-understands-her-fans).
+
+
+```{r}
+  ### Sentiment analysis by lyrics lines
+  cleaned_text %>% filter(str_detect(line, "\\w+")) %>% 
+  mutate(sentiment = get_sentiment(line)) %>%
+  mutate(polarity = ifelse(sentiment < 0, "NEGATIVE", "POSITIVE")) %>%
+    group_by(polarity) %>%
+    slice_max(order_by= abs(sentiment), n = 10) %>%
+    ungroup() %>%
+    ggplot(aes(reorder(line, sentiment), sentiment, fill = polarity)) +
+    geom_col(show.legend = FALSE) +
+    coord_flip() + xlab("")
+```
+
+We are not surprised that she wrote so many songs for her romantic relationships; we do not expect her to be a victim of rumors and cyber violence, and she even wrote down in her songs! 
+When we check the most common optimistic and positive words, one question is whether positive words like "love" are positive. We are confused as negation words like "don't," "won't," and "ain't" might be neglected in the bing analysis. We start by finding and counting all the bigrams in the cleaned line data table; meanwhile, we define a list of six words that we suspect are used in negation, including "not," "no," "can't," "don't," "won't" and "never," and visualize the sentiment-associated words that most often followed them. We see the terms that most often contributed in the "wrong" direction.
+
+### 4.  N-gram Analysis
+```{r}
+# N-gram analysis
+cleaned_text <- lyrics_All[album %in% st_album, .(song_id, album, line),] %>% filter(str_detect(line, "^[^>]+[A-Za-z\\d]") | line == "")
+
+ n_bigrams <- cleaned_text %>%
+  unnest_tokens(bigram, line, token = "ngrams", n = 2)
+
+TS_bigram_counts <- n_bigrams %>%
+  count(album, bigram, sort = TRUE) %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+negate_words <- c("not", "no", "can't", "don't", "won't", "never")
+
+TS_bigram_counts %>%
+  filter(word1 %in% negate_words) %>%
+  count(word1, word2, wt = n, sort = TRUE) %>%
+  inner_join(get_sentiments("afinn"), by = c(word2 = "word")) %>%
+  mutate(contribution = value * n) %>%
+  group_by(word1) %>%
+  slice_max(abs(contribution), n = 10) %>%
+  ungroup() %>%
+  mutate(word2 = reorder_within(word2, contribution, word1)) %>%
+  ggplot(aes(contribution, word2, fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ word1, scales = "free", nrow = 3) +
+  scale_y_reordered() +
+  labs(x = "Sentiment value * # of occurrences",
+       y = "Words preceded by a negation")
+```
+
+It looks like the largest sources of misidentifying a word as positive come from "don't like/want/love," and the largest source of incorrectly classified negative sentiment is "don't blame" and "never worse." Considering Taylor's most frequent positive words are "like" and "love," we can now confirm that her songs are not as optimistic as our previous plot shows.
+
+### 5.  Topic Modelling
+
+Unlike news or novels, lyrics might be hard to track topics, as seldom do lyrics describe events or make judgments, nor do lyrics use keywords. Still, we would like to try topic modeling to trace possible topics that Taylor uses in her songs. Here, we divide up lyrics from the nine classic albums. We first process these into a document-term matrix with "cast_dtm()," then fit the model with the **LDA()** function from the "**topicmodels**" package.
+
+```{r}
+# include only words that occur at least 50 times
+  word_albums <- TS_words[(album %in% st_album),,] %>%
+    filter(str_detect(album, regex(st_album, ignore_case = T))) %>%
+    group_by(word) %>%
+    mutate(word_total = n()) %>%
+    ungroup() %>%
+    filter(word_total > 12)
+  
+
+  TS_dtm <- word_albums %>%
+    unite(document, album, song_id) %>%
+    count(document, word) %>%
+    cast_dtm(document, word, n)
+
+  library(topicmodels)
+  TS_lda <- LDA(TS_dtm, k = 9, control = list(seed = 2022))  
+
+  TS_lda %>%
+    tidy() %>%
+    group_by(topic) %>%
+    slice_max(beta, n = 8) %>%
+    ungroup() %>%
+    mutate(term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(beta, term, fill = factor(topic))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free") +
+    scale_y_reordered()  
+  
+  TS_lda %>%
+    tidy(matrix = "gamma") %>%
+    separate(document, c("album", "song_id"), sep = "_") %>%
+    mutate(album = reorder(album, gamma * topic)) %>%
+    ggplot(aes(factor(topic), gamma)) +
+    geom_boxplot() +
+    facet_wrap(~ album) +
+    labs(x = "Topic",
+         y = "# of messages where this was the highest % topic")  
+  
+  beep()
+```
+Unfortunately, we have a rather dull result. Words like "time", "baby" and "wanna" appear the most times in each topic. None of any of these top words could help us identify the specific album. Yet, we can't confirm this by seeing how documents from each album have higher "gamma" for each topic, either. Since many of the lyrics are short and could overlap in common words, a substantial number of verses from each newsgroup may get high values of "gamma" for other topics.
+
+##  Summary
+
+Back to our question: can we use "love is all" to describe Taylor Swift? 
+
+**No**. She did write a lot of her romantic relations into her songs, but she also mentioned the cyberbullying she'd been through and how she'd avenge. The latter appears in both her darkest and lightest lines of lyrics. *Our Ms.American is more than a pop star with love songs; she knows how to vocalize her battle against unfair treatment.*
+
+* There is a lot of "love" and "Likes" in her songs and personal life, but not all that is the "right" and "optimistic" emotion. She appears pretty polarized in this issue: "I love you" a lot, and also "I don't love you" a lot.
+* Her darkest line comes from the fightback to disrespect of her career and herself. Her warmest line is from a beloved ex-boyfriend.
+* The album "Reputation" reveals her most gloomy days against slanders from Kanya and Kim Kardashian.
+* Taylor Swift has issued classic studio albums; "Reputation" and "1989" have the longest songs.
+* There is a slight increase (no more than 50 words in total) in her song length over the years.
+* Brendon Urie is her most frequent collaborator in performance.
+* Her longest song is "End Game," with more than 750 words.
+
+
